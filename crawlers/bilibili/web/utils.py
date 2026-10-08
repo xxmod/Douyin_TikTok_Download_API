@@ -1,7 +1,17 @@
+import hashlib
+import time
 from urllib.parse import urlencode
+import httpx
 from crawlers.bilibili.web import wrid
 from crawlers.utils.logger import logger
 from crawlers.bilibili.web.endpoints import BilibiliAPIEndpoints
+
+MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
 
 
 class EndpointGenerator:
@@ -50,28 +60,58 @@ class EndpointGenerator:
 
 
 class WridManager:
-    @classmethod
-    async def get_encode_query(cls, params: dict) -> str:
-        params['wts'] = params['wts'] + "ea1db124af3c7062474693fa704f4ff8"
-        params = dict(sorted(params.items()))  # 按照 key 重排参数
-        # 过滤 value 中的 "!'()*" 字符
-        params = {
-            k: ''.join(filter(lambda chr: chr not in "!'()*", str(v)))
-            for k, v
-            in params.items()
-        }
-        query = urlencode(params)  # 序列化参数
-        return query
+    _cached_mixin_key: str = "ea1db124af3c7062474693fa704f4ff8"
+    _cached_time: float = 0.0
+    _cache_ttl: float = 1800.0
 
     @classmethod
-    async def wrid_model_endpoint(cls, params: dict) -> str:
-        wts = params["wts"]
-        encode_query = await cls.get_encode_query(params)
-        # 获取w_rid参数
-        w_rid = wrid.get_wrid(e=encode_query)
-        params["wts"] = wts
+    async def get_mixin_key(cls, headers: dict = None) -> str:
+        now = time.time()
+        if cls._cached_mixin_key and (now - cls._cached_time < cls._cache_ttl):
+            return cls._cached_mixin_key
+
+        try:
+            req_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                "Referer": "https://www.bilibili.com/",
+            }
+            if headers:
+                req_headers.update(headers)
+
+            async with httpx.AsyncClient(headers=req_headers, timeout=10.0) as client:
+                resp = await client.get("https://api.bilibili.com/x/web-interface/nav")
+                if resp.status_code == 200:
+                    data = resp.json().get("data", {})
+                    wbi_img = data.get("wbi_img", {})
+                    img_url = wbi_img.get("img_url", "")
+                    sub_url = wbi_img.get("sub_url", "")
+                    if img_url and sub_url:
+                        img_key = img_url.split("/")[-1].split(".")[0]
+                        sub_key = sub_url.split("/")[-1].split(".")[0]
+                        raw_key = img_key + sub_key
+                        cls._cached_mixin_key = "".join([raw_key[i] for i in MIXIN_KEY_ENC_TAB])[:32]
+                        cls._cached_time = now
+                        return cls._cached_mixin_key
+        except Exception as e:
+            logger.warning(f"获取 Bilibili WBI mixin_key 失败，使用降级值: {e}")
+
+        return cls._cached_mixin_key
+
+    @classmethod
+    async def wrid_model_endpoint(cls, params: dict, headers: dict = None) -> str:
+        mixin_key = await cls.get_mixin_key(headers)
+        params["wts"] = str(int(time.time()))
+        sorted_params = dict(sorted(params.items()))
+        filtered_params = {
+            k: "".join(filter(lambda chr: chr not in "!'()*", str(v)))
+            for k, v in sorted_params.items()
+        }
+        query = urlencode(filtered_params)
+        w_rid = hashlib.md5((query + mixin_key).encode("utf-8")).hexdigest()
+        filtered_params["w_rid"] = w_rid
+        params["wts"] = filtered_params["wts"]
         params["w_rid"] = w_rid
-        return "&".join(f"{k}={v}" for k, v in params.items())
+        return urlencode(filtered_params)
 
 # BV号转为对应av号
 async def bv2av(bv_id: str) -> int:

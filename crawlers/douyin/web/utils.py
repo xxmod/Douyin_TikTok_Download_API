@@ -49,6 +49,7 @@ import yaml
 
 from crawlers.douyin.web.xbogus import XBogus as XB
 from crawlers.douyin.web.abogus import ABogus as AB
+from crawlers.douyin.web import websign
 
 from crawlers.utils.api_exceptions import (
     APIError,
@@ -290,18 +291,57 @@ class BogusManager:
     #     except Exception as e:
     #         raise RuntimeError("生成A-Bogus失败: {0})".format(e))
 
-    # 字典方法生成A-Bogus参数，感谢 @JoeanAmier 提供的纯Python版本算法。
+    # 字典方法生成A-Bogus参数
     @classmethod
     def ab_model_2_endpoint(cls, params: dict, user_agent: str) -> str:
         if not isinstance(params, dict):
             raise TypeError("参数必须是字典类型")
 
+        query = "&".join(f"{quote(str(k), safe='')}={quote(str(v), safe='')}" for k, v in params.items())
         try:
-            ab_value = AB().get_value(params, )
+            ab_value = AB(user_agent=user_agent).get_value(query)
         except Exception as e:
-            raise RuntimeError("生成A-Bogus失败: {0})".format(e))
+            raise RuntimeError(f"生成A-Bogus失败: {e}")
 
         return quote(ab_value, safe='')
+
+    @classmethod
+    def sign_douyin_endpoint(cls, base_endpoint: str, params: dict, user_agent: str, cookie: str = "") -> tuple[str, dict]:
+        """
+        完整的抖音端点签名：计算 A-Bogus，若 Cookie 中有 uifid 则附加 x-secsdk-web-signature 及配套请求头
+        返回 (final_url, extra_headers)
+        """
+        if not isinstance(params, dict):
+            raise TypeError("参数必须是字典类型")
+
+        cookie_jar = {}
+        if cookie:
+            for item in cookie.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    cookie_jar[k] = v
+
+        query = "&".join(f"{quote(str(k), safe='')}={quote(str(v), safe='')}" for k, v in params.items())
+        try:
+            ab_value = AB(user_agent=user_agent).get_value(query)
+        except Exception as e:
+            raise RuntimeError(f"生成A-Bogus失败: {e}")
+
+        full_query = f"{query}&a_bogus={quote(ab_value, safe='')}"
+        extra_headers = {}
+        uifid = websign.pick_uifid(cookie_jar)
+        if uifid:
+            pairs = [part.split("=", 1) for part in full_query.split("&") if part]
+            pairs = [(p[0], p[1] if len(p) > 1 else "") for p in pairs]
+            verify_fp = cookie_jar.get(websign.VERIFY_FP_COOKIE)
+            if verify_fp:
+                for name in websign.VERIFY_FP_PARAMS:
+                    pairs.append((name, verify_fp))
+            full_query, signature, extra_headers = websign.sign(pairs, uifid)
+
+        separator = "&" if "?" in base_endpoint else "?"
+        final_url = f"{base_endpoint}{separator}{full_query}"
+        return final_url, extra_headers
 
 
 class SecUserIdFetcher:

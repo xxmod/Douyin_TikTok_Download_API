@@ -20,32 +20,43 @@ config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pa
 with open(config_path, 'r', encoding='utf-8') as file:
     config = yaml.safe_load(file)
 
+def _normalize_headers(headers: dict = None) -> dict:
+    default_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+    if not headers:
+        return {'User-Agent': default_ua}
+    if isinstance(headers, dict) and 'headers' in headers and isinstance(headers['headers'], dict):
+        norm = dict(headers['headers'])
+    else:
+        norm = dict(headers)
+    if 'User-Agent' not in norm and 'user-agent' not in norm:
+        norm['User-Agent'] = default_ua
+    return norm
+
 async def fetch_data(url: str, headers: dict = None):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    } if headers is None else headers.get('headers')
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()  # 确保响应是成功的
+    req_headers = _normalize_headers(headers)
+    if ('bilibili' in url or 'bilivideo' in url) and 'referer' not in {k.lower(): v for k, v in req_headers.items()}:
+        req_headers['Referer'] = 'https://www.bilibili.com/'
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+        response = await client.get(url, headers=req_headers)
+        response.raise_for_status()
         return response
 
 # 下载视频专用
-async def fetch_data_stream(url: str, request:Request , headers: dict = None, file_path: str = None):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    } if headers is None else headers.get('headers')
-    async with httpx.AsyncClient() as client:
-        # 启用流式请求
-        async with client.stream("GET", url, headers=headers) as response:
-            response.raise_for_status()
+async def fetch_data_stream(url: str, request: Request, headers: dict = None, file_path: str = None):
+    req_headers = _normalize_headers(headers)
+    if ('bilibili' in url or 'bilivideo' in url) and 'referer' not in {k.lower(): v for k, v in req_headers.items()}:
+        req_headers['Referer'] = 'https://www.bilibili.com/'
 
-            # 流式保存文件
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+        async with client.stream("GET", url, headers=req_headers) as response:
+            response.raise_for_status()
             async with aiofiles.open(file_path, 'wb') as out_file:
-                async for chunk in response.aiter_bytes():
+                async for chunk in response.aiter_bytes(chunk_size=65536):
                     if await request.is_disconnected():
                         print("客户端断开连接，清理未完成的文件")
                         await out_file.close()
-                        os.remove(file_path)
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
                         return False
                     await out_file.write(chunk)
             return True
@@ -54,17 +65,27 @@ async def merge_bilibili_video_audio(video_url: str, audio_url: str, request: Re
     """
     下载并合并 Bilibili 的视频流和音频流
     """
+    req_headers = _normalize_headers(headers)
+    if 'referer' not in {k.lower(): v for k, v in req_headers.items()}:
+        req_headers['Referer'] = 'https://www.bilibili.com/'
+
+    video_temp_path = None
+    audio_temp_path = None
     try:
+        # 如果没有单独音频流（例如 durl 模式），直接下载视频流到 output_path
+        if not audio_url:
+            return await fetch_data_stream(video_url, request, headers=req_headers, file_path=output_path)
+
         # 创建临时文件
-        with tempfile.NamedTemporaryFile(suffix='.m4v', delete=False) as video_temp:
+        with tempfile.NamedTemporaryFile(suffix='.m4s', delete=False) as video_temp:
             video_temp_path = video_temp.name
-        with tempfile.NamedTemporaryFile(suffix='.m4a', delete=False) as audio_temp:
+        with tempfile.NamedTemporaryFile(suffix='.m4s', delete=False) as audio_temp:
             audio_temp_path = audio_temp.name
         
         # 下载视频流
-        video_success = await fetch_data_stream(video_url, request, headers=headers, file_path=video_temp_path)
+        video_success = await fetch_data_stream(video_url, request, headers=req_headers, file_path=video_temp_path)
         # 下载音频流
-        audio_success = await fetch_data_stream(audio_url, request, headers=headers, file_path=audio_temp_path)
+        audio_success = await fetch_data_stream(audio_url, request, headers=req_headers, file_path=audio_temp_path)
         
         if not video_success or not audio_success:
             print("Failed to download video or audio stream")
@@ -72,41 +93,40 @@ async def merge_bilibili_video_audio(video_url: str, audio_url: str, request: Re
         
         # 使用 FFmpeg 合并视频和音频
         ffmpeg_cmd = [
-            'ffmpeg', '-y',  # -y 覆盖输出文件
-            '-i', video_temp_path,  # 视频输入
-            '-i', audio_temp_path,  # 音频输入
-            '-c:v', 'copy',  # 复制视频编码，不重新编码
-            '-c:a', 'copy',  # 复制音频编码，不重新编码（保持原始质量）
-            '-f', 'mp4',     # 确保输出格式为MP4
+            'ffmpeg', '-y',
+            '-i', video_temp_path,
+            '-i', audio_temp_path,
+            '-c:v', 'copy',
+            '-c:a', 'copy',
+            '-f', 'mp4',
             output_path
         ]
         
         print(f"FFmpeg command: {' '.join(ffmpeg_cmd)}")
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         print(f"FFmpeg return code: {result.returncode}")
-        if result.stderr:
-            print(f"FFmpeg stderr: {result.stderr}")
-        if result.stdout:
-            print(f"FFmpeg stdout: {result.stdout}")
+        if result.returncode != 0:
+            if result.stderr:
+                print(f"FFmpeg stderr: {result.stderr}")
+            return False
         
-        # 清理临时文件
-        try:
-            os.unlink(video_temp_path)
-            os.unlink(audio_temp_path)
-        except:
-            pass
-        
-        return result.returncode == 0
+        return True
         
     except Exception as e:
-        # 清理临时文件
-        try:
-            os.unlink(video_temp_path)
-            os.unlink(audio_temp_path)
-        except:
-            pass
         print(f"Error merging video and audio: {e}")
         return False
+    finally:
+        # 清理临时文件
+        if video_temp_path and os.path.exists(video_temp_path):
+            try:
+                os.unlink(video_temp_path)
+            except Exception:
+                pass
+        if audio_temp_path and os.path.exists(audio_temp_path):
+            try:
+                os.unlink(audio_temp_path)
+            except Exception:
+                pass
 
 @router.get("/download", summary="在线下载抖音|TikTok|Bilibili视频/图片/Online download Douyin|TikTok|Bilibili video/image")
 async def download_file_hybrid(request: Request,
@@ -165,7 +185,7 @@ async def download_file_hybrid(request: Request,
     try:
         data_type = data.get('type')
         platform = data.get('platform')
-        video_id = data.get('video_id')  # 改为使用video_id
+        video_id = data.get('video_id')
         file_prefix = config.get("API").get("Download_File_Prefix") if prefix else ''
         download_path = os.path.join(config.get("API").get("Download_Path"), f"{platform}_{data_type}")
 
@@ -177,49 +197,58 @@ async def download_file_hybrid(request: Request,
             file_name = f"{file_prefix}{platform}_{video_id}.mp4" if not with_watermark else f"{file_prefix}{platform}_{video_id}_watermark.mp4"
             file_path = os.path.join(download_path, file_name)
 
-            # 判断文件是否存在，存在就直接返回
-            if os.path.exists(file_path):
+            # 判断文件是否存在且非空，存在就直接返回
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 return FileResponse(path=file_path, media_type='video/mp4', filename=file_name)
 
             # 获取对应平台的headers
             if platform == 'tiktok':
-                __headers = await HybridCrawler.TikTokWebCrawler.get_tiktok_headers()
+                raw_headers = await HybridCrawler.TikTokWebCrawler.get_tiktok_headers()
             elif platform == 'bilibili':
-                __headers = await HybridCrawler.BilibiliWebCrawler.get_bilibili_headers()
+                raw_headers = await HybridCrawler.BilibiliWebCrawler.get_bilibili_headers()
             else:  # douyin
-                __headers = await HybridCrawler.DouyinWebCrawler.get_douyin_headers()
+                raw_headers = await HybridCrawler.DouyinWebCrawler.get_douyin_headers()
+            __headers = _normalize_headers(raw_headers)
 
             # Bilibili 特殊处理：音视频分离
             if platform == 'bilibili':
                 video_data = data.get('video_data', {})
                 video_url = video_data.get('nwm_video_url_HQ') if not with_watermark else video_data.get('wm_video_url_HQ')
                 audio_url = video_data.get('audio_url')
-                if not video_url or not audio_url:
+                if not video_url:
                     raise HTTPException(
                         status_code=500,
-                        detail="Failed to get video or audio URL from Bilibili"
+                        detail="Failed to get video URL from Bilibili"
                     )
                 
                 # 使用专门的函数合并音视频
-                success = await merge_bilibili_video_audio(video_url, audio_url, request, file_path, __headers.get('headers'))
-                if not success:
+                success = await merge_bilibili_video_audio(video_url, audio_url, request, file_path, __headers)
+                if not success or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
                     raise HTTPException(
                         status_code=500,
                         detail="Failed to merge Bilibili video and audio streams"
                     )
             else:
                 # 其他平台的常规处理
-                url = data.get('video_data').get('nwm_video_url_HQ') if not with_watermark else data.get('video_data').get('wm_video_url_HQ')
+                video_data = data.get('video_data', {})
+                url = video_data.get('nwm_video_url_HQ') if not with_watermark else video_data.get('wm_video_url_HQ')
+                if not url:
+                    url = video_data.get('nwm_video_url') if not with_watermark else video_data.get('wm_video_url')
+                if not url:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to get video download URL"
+                    )
                 success = await fetch_data_stream(url, request, headers=__headers, file_path=file_path)
-                if not success:
+                if not success or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
                     raise HTTPException(
                         status_code=500,
                         detail="An error occurred while fetching data"
                     )
-
-            # # 保存文件
-            # async with aiofiles.open(file_path, 'wb') as out_file:
-            #     await out_file.write(response.content)
 
             # 返回文件内容
             return FileResponse(path=file_path, filename=file_name, media_type="video/mp4")
