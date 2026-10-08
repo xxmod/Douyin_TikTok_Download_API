@@ -63,26 +63,34 @@ from crawlers.douyin.web.utils import (AwemeIdFetcher,  # Aweme ID获取
 path = os.path.abspath(os.path.dirname(__file__))
 
 # 读取配置文件
-with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
-    config = yaml.safe_load(f)
+try:
+    with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+except Exception:
+    config = {}
 
 
 class DouyinWebCrawler:
 
     # 从配置文件中获取抖音的请求头
     async def get_douyin_headers(self):
-        douyin_config = config["TokenManager"]["douyin"]
-        ua = douyin_config["headers"].get("User-Agent", "")
+        douyin_config = (config.get("TokenManager") or {}).get("douyin") or {} if isinstance(config, dict) else {}
+        headers = douyin_config.get("headers") or {}
+        proxies = douyin_config.get("proxies") or {}
+        ua = headers.get("User-Agent", "")
         if "Chrome/90" in ua or not ua:
             ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
         kwargs = {
             "headers": {
-                "Accept-Language": douyin_config["headers"].get("Accept-Language", "zh-CN,zh;q=0.9"),
+                "Accept-Language": headers.get("Accept-Language", "zh-CN,zh;q=0.9"),
                 "User-Agent": ua,
-                "Referer": douyin_config["headers"].get("Referer", "https://www.douyin.com/"),
-                "Cookie": douyin_config["headers"].get("Cookie", ""),
+                "Referer": headers.get("Referer", "https://www.douyin.com/"),
+                "Cookie": headers.get("Cookie", ""),
             },
-            "proxies": {"http://": douyin_config["proxies"].get("http"), "https://": douyin_config["proxies"].get("https")},
+            "proxies": {
+                "http://": proxies.get("http", None) if isinstance(proxies, dict) else None,
+                "https://": proxies.get("https", None) if isinstance(proxies, dict) else None
+            },
         }
         return kwargs
 

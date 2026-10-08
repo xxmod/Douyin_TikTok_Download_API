@@ -29,19 +29,23 @@ from crawlers.utils.api_exceptions import (
 path = os.path.abspath(os.path.dirname(__file__))
 
 # 读取配置文件
-with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
-    config = yaml.safe_load(f)
+try:
+    with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+except Exception as e:
+    logger.warning(f"Failed to load tiktok web config: {e}")
+    config = {}
 
 
 class TokenManager:
-    tiktok_manager = config.get("TokenManager").get("tiktok")
-    token_conf = tiktok_manager.get("msToken", None)
-    ttwid_conf = tiktok_manager.get("ttwid", None)
-    odin_tt_conf = tiktok_manager.get("odin_tt", None)
-    proxies_conf = tiktok_manager.get("proxies", None)
+    tiktok_manager = (config.get("TokenManager") or {}).get("tiktok") or {} if isinstance(config, dict) else {}
+    token_conf = tiktok_manager.get("msToken") or {} if isinstance(tiktok_manager, dict) else {}
+    ttwid_conf = tiktok_manager.get("ttwid") or {} if isinstance(tiktok_manager, dict) else {}
+    odin_tt_conf = tiktok_manager.get("odin_tt") or {} if isinstance(tiktok_manager, dict) else {}
+    proxies_conf = tiktok_manager.get("proxies") or {} if isinstance(tiktok_manager, dict) else {}
     proxies = {
-        "http://": proxies_conf.get("http", None),
-        "https://": proxies_conf.get("https", None),
+        "http://": proxies_conf.get("http", None) if isinstance(proxies_conf, dict) else None,
+        "https://": proxies_conf.get("https", None) if isinstance(proxies_conf, dict) else None,
     }
 
     @classmethod
@@ -50,62 +54,44 @@ class TokenManager:
         生成真实的msToken,当出现错误时返回虚假的值
         (Generate a real msToken and return a false value when an error occurs)
         """
+        if not cls.token_conf:
+            return cls.gen_false_msToken()
 
-        payload = json.dumps(
-            {
-                "magic": cls.token_conf["magic"],
-                "version": cls.token_conf["version"],
-                "dataType": cls.token_conf["dataType"],
-                "strData": cls.token_conf["strData"],
-                "tspFromClient": get_timestamp(),
+        try:
+            payload = json.dumps(
+                {
+                    "magic": cls.token_conf.get("magic", 538969122),
+                    "version": cls.token_conf.get("version", 1),
+                    "dataType": cls.token_conf.get("dataType", 8),
+                    "strData": cls.token_conf.get("strData", ""),
+                    "tspFromClient": get_timestamp(),
+                }
+            )
+
+            headers = {
+                "User-Agent": cls.token_conf.get("User-Agent", "Mozilla/5.0"),
+                "Content-Type": "application/json",
             }
-        )
 
-        headers = {
-            "User-Agent": cls.token_conf["User-Agent"],
-            "Content-Type": "application/json",
-        }
-
-        transport = httpx.HTTPTransport(retries=5)
-        with httpx.Client(transport=transport, proxies=cls.proxies) as client:
-            try:
+            transport = httpx.HTTPTransport(retries=5)
+            with httpx.Client(transport=transport, proxies=cls.proxies) as client:
                 response = client.post(
-                    cls.token_conf["url"], headers=headers, content=payload
+                    cls.token_conf.get("url", "https://mssdk.tiktokw.us/web/report"),
+                    headers=headers,
+                    content=payload
                 )
                 response.raise_for_status()
 
                 msToken = str(httpx.Cookies(response.cookies).get("msToken"))
-
                 return msToken
 
-            # except httpx.RequestError as exc:
-            #     # 捕获所有与 httpx 请求相关的异常情况 (Captures all httpx request-related exceptions)
-            #     raise APIConnectionError("请求端点失败，请检查当前网络环境。 链接：{0}，代理：{1}，异常类名：{2}，异常详细信息：{3}"
-            #                              .format(cls.token_conf["url"], cls.proxies, cls.__name__, exc)
-            #                              )
-            #
-            # except httpx.HTTPStatusError as e:
-            #     # 捕获 httpx 的状态代码错误 (captures specific status code errors from httpx)
-            #     if response.status_code == 401:
-            #         raise APIUnauthorizedError("参数验证失败，请更新 Douyin_TikTok_Download_API 配置文件中的 {0}，以匹配 {1} 新规则"
-            #                                    .format("msToken", "tiktok")
-            #                                    )
-            #
-            #     elif response.status_code == 404:
-            #         raise APINotFoundError("{0} 无法找到API端点".format("msToken"))
-            #     else:
-            #         raise APIResponseError("链接：{0}，状态码 {1}：{2} ".format(
-            #             e.response.url, e.response.status_code, e.response.text
-            #         )
-            #         )
-
-            except Exception as e:
-                # 返回虚假的msToken (Return a fake msToken)
-                logger.error("生成TikTok msToken API错误：{0}".format(e))
-                logger.info("当前网络无法正常访问TikTok服务器，已经使用虚假msToken以继续运行。")
-                logger.info("并且TikTok相关API大概率无法正常使用，请在(/tiktok/web/config.yaml)中更新代理。")
-                logger.info("如果你不需要使用TikTok相关API，请忽略此消息。")
-                return cls.gen_false_msToken()
+        except Exception as e:
+            # 返回虚假的msToken (Return a fake msToken)
+            logger.error("生成TikTok msToken API错误：{0}".format(e))
+            logger.info("当前网络无法正常访问TikTok服务器，已经使用虚假msToken以继续运行。")
+            logger.info("并且TikTok相关API大概率无法正常使用，请在(/tiktok/web/config.yaml)中更新代理。")
+            logger.info("如果你不需要使用TikTok相关API，请忽略此消息。")
+            return cls.gen_false_msToken()
 
     @classmethod
     def gen_false_msToken(cls) -> str:

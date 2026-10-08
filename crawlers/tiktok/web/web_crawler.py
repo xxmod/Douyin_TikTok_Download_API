@@ -71,8 +71,11 @@ from crawlers.tiktok.web.models import (
 path = os.path.abspath(os.path.dirname(__file__))
 
 # 读取配置文件
-with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
-    config = yaml.safe_load(f)
+try:
+    with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+except Exception:
+    config = {}
 
 
 class TikTokWebCrawler:
@@ -82,15 +85,19 @@ class TikTokWebCrawler:
 
     # 从配置文件中获取TikTok的请求头
     async def get_tiktok_headers(self):
-        tiktok_config = config["TokenManager"]["tiktok"]
+        tiktok_config = (config.get("TokenManager") or {}).get("tiktok") or {} if isinstance(config, dict) else {}
+        headers = tiktok_config.get("headers") or {}
+        proxies = tiktok_config.get("proxies") or {}
         kwargs = {
             "headers": {
-                "User-Agent": tiktok_config["headers"]["User-Agent"],
-                "Referer": tiktok_config["headers"]["Referer"],
-                "Cookie": tiktok_config["headers"]["Cookie"],
+                "User-Agent": headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+                "Referer": headers.get("Referer", "https://www.tiktok.com/"),
+                "Cookie": headers.get("Cookie", ""),
             },
-            "proxies": {"http://": tiktok_config["proxies"]["http"],
-                        "https://": tiktok_config["proxies"]["https"]}
+            "proxies": {
+                "http://": proxies.get("http", None) if isinstance(proxies, dict) else None,
+                "https://": proxies.get("https", None) if isinstance(proxies, dict) else None
+            }
         }
         return kwargs
 

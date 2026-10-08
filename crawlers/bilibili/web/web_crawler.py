@@ -49,24 +49,32 @@ from crawlers.bilibili.web.models import UserPostVideos, UserProfile, ComPopular
 path = os.path.abspath(os.path.dirname(__file__))
 
 # 读取配置文件
-with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
-    config = yaml.safe_load(f)
+try:
+    with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+except Exception:
+    config = {}
 
 
 class BilibiliWebCrawler:
 
     # 从配置文件读取哔哩哔哩请求头
     async def get_bilibili_headers(self):
-        bili_config = config['TokenManager']['bilibili']
+        bili_config = (config.get("TokenManager") or {}).get("bilibili") or {} if isinstance(config, dict) else {}
+        headers = bili_config.get("headers") or {}
+        proxies = bili_config.get("proxies") or {}
         kwargs = {
             "headers": {
-                "accept-language": bili_config["headers"]["accept-language"],
-                "origin": bili_config["headers"]["origin"],
-                "referer": bili_config["headers"]["referer"],
-                "user-agent": bili_config["headers"]["user-agent"],
-                "cookie": bili_config["headers"]["cookie"],
+                "accept-language": headers.get("accept-language", "zh-CN,zh;q=0.9"),
+                "origin": headers.get("origin", "https://www.bilibili.com"),
+                "referer": headers.get("referer", "https://www.bilibili.com/"),
+                "user-agent": headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+                "cookie": headers.get("cookie", ""),
             },
-            "proxies": {"http://": bili_config["proxies"]["http"], "https://": bili_config["proxies"]["https"]},
+            "proxies": {
+                "http://": proxies.get("http", None) if isinstance(proxies, dict) else None,
+                "https://": proxies.get("https", None) if isinstance(proxies, dict) else None
+            },
         }
         return kwargs
 
